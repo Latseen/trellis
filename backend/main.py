@@ -7,7 +7,7 @@ from services.geocoder import geocode_address
 from services.pluto import get_building
 from services.scorer import score_green_roof
 
-app = FastAPI(title="Overstory API", version="0.1.0")
+app = FastAPI(title="Trellis API", version="0.1.0")
 
 app.add_middleware(
     CORSMiddleware,

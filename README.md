@@ -1,4 +1,4 @@
-# Overstory
+# Trellis
 
 Green roof and living wall suitability checker for NYC buildings.
 
@@ -7,7 +7,7 @@ Enter an address and get a suitability score with a factor-by-factor breakdown �
 ## Project Structure
 
 ```
-overstory/
+trellis/
   backend/    # FastAPI — scoring API, PLUTO + geocoding integration
   frontend/   # Next.js — map interface and score display
 ```

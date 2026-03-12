@@ -4,7 +4,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## What This Is
 
-Overstory is a green roof / living wall suitability checker for NYC buildings. Users enter an address and receive a 0–100 suitability score with a factor-by-factor breakdown.
+Trellis is a green roof / living wall suitability checker for NYC buildings. Users enter an address and receive a 0–100 suitability score with a factor-by-factor breakdown.
 
 ## Backend Commands
 
