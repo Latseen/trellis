@@ -105,6 +105,80 @@ function getBuildingColors(cls: string, era: Era): [number, number, number] {
 }
 
 // ---------------------------------------------------------------------------
+// Famous building stepped profiles
+// ---------------------------------------------------------------------------
+
+interface BuildingTier {
+  fromFrac: number; // fraction of total height where tier starts
+  toFrac: number;   // fraction of total height where tier ends
+  scale: number;    // XZ scale relative to full footprint (1.0 = full width)
+}
+
+// Keyed by PLUTO BBL (borough+block+lot string).
+// Each profile describes the stepped silhouette of the building.
+const FAMOUS_PROFILES: Record<string, BuildingTier[]> = {
+  // Empire State Building — Art Deco setbacks + mooring mast + spire
+  '1008350047': [
+    { fromFrac: 0.00, toFrac: 0.14, scale: 1.00 },
+    { fromFrac: 0.14, toFrac: 0.48, scale: 0.80 },
+    { fromFrac: 0.48, toFrac: 0.63, scale: 0.60 },
+    { fromFrac: 0.63, toFrac: 0.77, scale: 0.42 },
+    { fromFrac: 0.77, toFrac: 0.86, scale: 0.26 },
+    { fromFrac: 0.86, toFrac: 0.92, scale: 0.13 },
+    { fromFrac: 0.92, toFrac: 1.00, scale: 0.05 },
+  ],
+  // 30 Rockefeller Plaza — stepped Art Deco slab
+  '1012390001': [
+    { fromFrac: 0.00, toFrac: 0.10, scale: 1.00 },
+    { fromFrac: 0.10, toFrac: 0.50, scale: 0.86 },
+    { fromFrac: 0.50, toFrac: 0.68, scale: 0.68 },
+    { fromFrac: 0.68, toFrac: 0.83, scale: 0.52 },
+    { fromFrac: 0.83, toFrac: 1.00, scale: 0.38 },
+  ],
+};
+
+// Build an array of wall + roof-cap meshes for a stepped profile.
+// Each tier's footprint is the outerRing scaled by footprintScale * tier.scale.
+// Height uses only footprintScale so proportions stay consistent.
+function buildTieredMeshes(
+  outerRing: [number, number][],
+  tiers: BuildingTier[],
+  heightFt: number,
+  footprintScale: number,
+  wallMat: THREE.Material,
+  roofMat: THREE.Material,
+): THREE.Mesh[] {
+  const meshes: THREE.Mesh[] = [];
+  const renderedTotalH = heightFt * footprintScale;
+
+  for (const { fromFrac, toFrac, scale } of tiers) {
+    const startY = fromFrac * renderedTotalH;
+    const depth = (toFrac - fromFrac) * renderedTotalH;
+    const xzScale = footprintScale * scale;
+
+    const scaledRing = outerRing.map(([x, y]) => [x * xzScale, y * xzScale] as [number, number]);
+    const shape = new THREE.Shape();
+    shape.moveTo(scaledRing[0][0], scaledRing[0][1]);
+    for (let j = 1; j < scaledRing.length; j++) shape.lineTo(scaledRing[j][0], scaledRing[j][1]);
+    shape.closePath();
+
+    // Wall extrusion
+    const geo = new THREE.ExtrudeGeometry(shape, { depth, bevelEnabled: false });
+    geo.rotateX(-Math.PI / 2);
+    geo.translate(0, startY, 0);
+    meshes.push(new THREE.Mesh(geo, wallMat));
+
+    // Roof/ledge cap on top of this tier (visible as the step ledge or final roof)
+    const roofGeo = new THREE.ShapeGeometry(shape);
+    roofGeo.rotateX(-Math.PI / 2);
+    roofGeo.translate(0, startY + depth, 0);
+    meshes.push(new THREE.Mesh(roofGeo, roofMat));
+  }
+
+  return meshes;
+}
+
+// ---------------------------------------------------------------------------
 // GeoJSON → local feet projection
 // ---------------------------------------------------------------------------
 
@@ -248,20 +322,11 @@ export function drawBuilding3d(
 
   const heightFt = building.height_ft ?? Math.max(12, (building.num_floors ?? 4) * 12);
 
-  let wallMesh: THREE.Mesh;
-  let roofMesh: THREE.Mesh;
   let footprintScale = 1;
+  const bodyMeshes: THREE.Mesh[] = [];
 
   if (building.the_geom) {
-    // Real footprint extrusion
     const outerRing = footprintToLocalFt(building.the_geom as GeoJSONGeom);
-
-    const shape = new THREE.Shape();
-    shape.moveTo(outerRing[0][0], outerRing[0][1]);
-    for (let i = 1; i < outerRing.length; i++) {
-      shape.lineTo(outerRing[i][0], outerRing[i][1]);
-    }
-    shape.closePath();
 
     // Scale footprint to fit view (keep height proportional)
     const xs = outerRing.map(p => p[0]);
@@ -271,25 +336,28 @@ export function drawBuilding3d(
     const maxFootprintDim = Math.max(bboxW, bboxD);
     footprintScale = maxFootprintDim > 0 ? (viewSize * 0.7) / maxFootprintDim : 1;
 
-    const extrudeSettings: THREE.ExtrudeGeometryOptions = {
-      depth: heightFt,
-      bevelEnabled: false,
-    };
+    const profile = FAMOUS_PROFILES[building.bbl];
+    if (profile) {
+      // Stepped silhouette for famous buildings
+      bodyMeshes.push(...buildTieredMeshes(outerRing, profile, heightFt, footprintScale, wallMat, roofMat));
+    } else {
+      // Standard single extrusion
+      const shape = new THREE.Shape();
+      shape.moveTo(outerRing[0][0], outerRing[0][1]);
+      for (let i = 1; i < outerRing.length; i++) shape.lineTo(outerRing[i][0], outerRing[i][1]);
+      shape.closePath();
 
-    const geo = new THREE.ExtrudeGeometry(shape, extrudeSettings);
-    // ExtrudeGeometry places shape in XY plane, extrudes along +Z.
-    // Rotate so footprint is in XZ plane (Three.js Y-up) and extrusion goes up along Y.
-    geo.rotateX(-Math.PI / 2);
-    geo.scale(footprintScale, footprintScale, footprintScale);
+      const geo = new THREE.ExtrudeGeometry(shape, { depth: heightFt, bevelEnabled: false });
+      geo.rotateX(-Math.PI / 2);
+      geo.scale(footprintScale, footprintScale, footprintScale);
+      bodyMeshes.push(new THREE.Mesh(geo, wallMat));
 
-    wallMesh = new THREE.Mesh(geo, wallMat);
-
-    // Roof cap: flat shape at the top of the extrusion
-    const roofGeo = new THREE.ShapeGeometry(shape);
-    roofGeo.rotateX(-Math.PI / 2);
-    roofGeo.scale(footprintScale, footprintScale, footprintScale);
-    roofGeo.translate(0, heightFt * footprintScale, 0);
-    roofMesh = new THREE.Mesh(roofGeo, roofMat);
+      const roofGeo = new THREE.ShapeGeometry(shape);
+      roofGeo.rotateX(-Math.PI / 2);
+      roofGeo.scale(footprintScale, footprintScale, footprintScale);
+      roofGeo.translate(0, heightFt * footprintScale, 0);
+      bodyMeshes.push(new THREE.Mesh(roofGeo, roofMat));
+    }
   } else {
     // Fallback: rectangular box from lot/floor data
     const floorArea = building.bld_area
@@ -308,19 +376,18 @@ export function drawBuilding3d(
     const geo = new THREE.ExtrudeGeometry(shape, { depth: heightFt, bevelEnabled: false });
     geo.rotateX(-Math.PI / 2);
     geo.scale(footprintScale, footprintScale, footprintScale);
-    wallMesh = new THREE.Mesh(geo, wallMat);
+    bodyMeshes.push(new THREE.Mesh(geo, wallMat));
 
     const roofGeo = new THREE.ShapeGeometry(shape);
     roofGeo.rotateX(-Math.PI / 2);
     roofGeo.scale(footprintScale, footprintScale, footprintScale);
     roofGeo.translate(0, heightFt * footprintScale, 0);
-    roofMesh = new THREE.Mesh(roofGeo, roofMat);
+    bodyMeshes.push(new THREE.Mesh(roofGeo, roofMat));
   }
 
   // Group all building meshes so rotation is applied together
   const buildingGroup = new THREE.Group();
-  buildingGroup.add(wallMesh);
-  buildingGroup.add(roofMesh);
+  for (const m of bodyMeshes) buildingGroup.add(m);
 
   // ------------------------------------------------------------------
   // Green roof overlay (score-based)
@@ -398,12 +465,12 @@ export function drawBuilding3d(
   // ------------------------------------------------------------------
   function cleanup() {
     cancelAnimationFrame(rafId);
-    wallMesh.geometry.dispose();
-    roofMesh.geometry.dispose();
-    if (greenMesh) greenMesh.geometry.dispose();
-    (wallMesh.material as THREE.Material).dispose();
-    (roofMesh.material as THREE.Material).dispose();
-    if (greenMesh) (greenMesh.material as THREE.Material).dispose();
+    buildingGroup.traverse(obj => {
+      if (obj instanceof THREE.Mesh) {
+        obj.geometry.dispose();
+        (obj.material as THREE.Material).dispose();
+      }
+    });
     renderer.dispose();
   }
 
