@@ -237,7 +237,14 @@ export function drawBuilding3d(
   const [wallHex, roofHex] = getBuildingColors(building.building_class, era);
 
   const wallMat = new THREE.MeshLambertMaterial({ color: wallHex });
-  const roofMat = new THREE.MeshLambertMaterial({ color: roofHex });
+  // polygonOffset pushes the roof cap in front of the extrusion's built-in top
+  // cap, preventing z-fighting as the building rotates.
+  const roofMat = new THREE.MeshLambertMaterial({
+    color: roofHex,
+    polygonOffset: true,
+    polygonOffsetFactor: -1,
+    polygonOffsetUnits: -4,
+  });
 
   const heightFt = building.height_ft ?? Math.max(12, (building.num_floors ?? 4) * 12);
 
@@ -344,6 +351,9 @@ export function drawBuilding3d(
       color: 0x4a9a28,
       transparent: true,
       opacity: 0.85,
+      polygonOffset: true,
+      polygonOffsetFactor: -2,
+      polygonOffsetUnits: -8,
     });
     greenMesh = new THREE.Mesh(greenGeo, greenMat);
     buildingGroup.add(greenMesh);
