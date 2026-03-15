@@ -352,6 +352,25 @@ export function drawBuilding3d(
   scene.add(buildingGroup);
 
   // ------------------------------------------------------------------
+  // Refit camera to actual rendered building extents
+  // ------------------------------------------------------------------
+  const renderedHeight = heightFt * footprintScale;
+  const centerY = renderedHeight / 2;
+
+  // In isometric view the building's vertical extent projects onto screen Y.
+  // Use the larger of footprint half-size or the building's half-height so
+  // nothing gets clipped regardless of aspect ratio or building proportions.
+  const neededHalf = Math.max(viewSize, centerY * 1.25);
+  camera.top = neededHalf;
+  camera.bottom = -neededHalf;
+  camera.left = -neededHalf * aspect;
+  camera.right = neededHalf * aspect;
+  // Shift lookAt to vertical center so the building is centered in the frame
+  camera.position.set(camDist, camDist + centerY, camDist);
+  camera.lookAt(0, centerY, 0);
+  camera.updateProjectionMatrix();
+
+  // ------------------------------------------------------------------
   // Rotation animation
   // ------------------------------------------------------------------
   let rafId: number;
