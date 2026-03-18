@@ -232,16 +232,43 @@ function partCentroid(part: OsmPart): [number, number] {
   return [lng, lat];
 }
 
+// Maximum number of parts we'll render.  OSM sometimes models every
+// individual decorative element (gargoyles, sunburst fins, eagle heads) as a
+// separate way; rendering them all causes z-fighting and visual noise.
+// We keep only the structurally significant parts, sorted by depth descending.
+const MAX_PARTS = 12;
+
 function filterPartsToBuilding(parts: OsmPart[], mainGeom: GeoJSONGeom): OsmPart[] {
   const bb = wgs84BBox(mainGeom);
-  // Expand by 20 % to be generous with parts that slightly overhang the footprint
   const dLng = (bb.maxLng - bb.minLng) * 0.2;
   const dLat = (bb.maxLat - bb.minLat) * 0.2;
-  return parts.filter(p => {
+
+  // 1. Bounding-box filter: discard parts from neighbouring buildings
+  const inBounds = parts.filter(p => {
+    if (!p.height_ft) return false;
     const [lng, lat] = partCentroid(p);
     return lng >= bb.minLng - dLng && lng <= bb.maxLng + dLng
         && lat >= bb.minLat - dLat && lat <= bb.maxLat + dLat;
   });
+
+  // 2. Sort by depth descending so we keep the most structurally significant parts
+  inBounds.sort((a, b) =>
+    (b.height_ft! - b.min_height_ft) - (a.height_ft! - a.min_height_ft)
+  );
+
+  // 3. Deduplicate: skip any part whose height range is already covered
+  //    within 2 ft by a part we've already kept (handles duplicate crown segments)
+  const kept: OsmPart[] = [];
+  for (const p of inBounds) {
+    const alreadyCovered = kept.some(k =>
+      Math.abs(k.height_ft! - p.height_ft!) < 2 &&
+      Math.abs(k.min_height_ft - p.min_height_ft) < 2
+    );
+    if (!alreadyCovered) kept.push(p);
+    if (kept.length >= MAX_PARTS) break;
+  }
+
+  return kept;
 }
 
 function buildOsmPartMeshes(
