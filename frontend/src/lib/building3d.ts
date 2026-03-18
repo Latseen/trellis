@@ -210,37 +210,80 @@ function roofCapMesh(shape: THREE.Shape, mat: THREE.Material, yTop: number): THR
 // Each part carries its own footprint polygon plus absolute min_height / height
 // values (in feet).  We project every part relative to the same WGS84 centre
 // so they all line up correctly, then extrude from min_height to height.
+//
+// Parts are filtered to those whose WGS84 centroid falls within the main
+// building's bounding box (expanded 20 %) to discard neighbouring buildings
+// that slipped in via the proximity fallback query.
+
+function wgs84BBox(geom: GeoJSONGeom): { minLng: number; maxLng: number; minLat: number; maxLat: number } {
+  const ring = geom.type === 'Polygon' ? geom.coordinates[0] : geom.coordinates[0][0];
+  let minLng = Infinity, maxLng = -Infinity, minLat = Infinity, maxLat = -Infinity;
+  for (const [lng, lat] of ring) {
+    if (lng < minLng) minLng = lng; if (lng > maxLng) maxLng = lng;
+    if (lat < minLat) minLat = lat; if (lat > maxLat) maxLat = lat;
+  }
+  return { minLng, maxLng, minLat, maxLat };
+}
+
+function partCentroid(part: OsmPart): [number, number] {
+  const coords = part.geometry.coordinates[0];
+  const lng = coords.reduce((s, p) => s + p[0], 0) / coords.length;
+  const lat = coords.reduce((s, p) => s + p[1], 0) / coords.length;
+  return [lng, lat];
+}
+
+function filterPartsToBuilding(parts: OsmPart[], mainGeom: GeoJSONGeom): OsmPart[] {
+  const bb = wgs84BBox(mainGeom);
+  // Expand by 20 % to be generous with parts that slightly overhang the footprint
+  const dLng = (bb.maxLng - bb.minLng) * 0.2;
+  const dLat = (bb.maxLat - bb.minLat) * 0.2;
+  return parts.filter(p => {
+    const [lng, lat] = partCentroid(p);
+    return lng >= bb.minLng - dLng && lng <= bb.maxLng + dLng
+        && lat >= bb.minLat - dLat && lat <= bb.maxLat + dLat;
+  });
+}
 
 function buildOsmPartMeshes(
   parts: OsmPart[],
+  mainGeom: GeoJSONGeom,
   cx: number,
   cy: number,
   footprintScale: number,
   wallMat: THREE.Material,
   roofMat: THREE.Material,
-): THREE.Mesh[] {
-  const meshes: THREE.Mesh[] = [];
+  edgeMat: THREE.LineBasicMaterial,
+): THREE.Object3D[] {
+  const objects: THREE.Object3D[] = [];
 
-  for (const part of parts) {
+  const filtered = filterPartsToBuilding(parts, mainGeom);
+
+  for (const part of filtered) {
     if (!part.height_ft) continue;
 
     const ring = footprintToLocalFt(part.geometry as GeoJSONGeom, cx, cy);
-    const shape = ringToShape(ring);
-
-    // Scale to screen space
     const scaledShape = new THREE.Shape(
-      shape.getPoints().map(p => new THREE.Vector2(p.x * footprintScale, p.y * footprintScale))
+      ring.map(([x, y]) => new THREE.Vector2(x * footprintScale, y * footprintScale))
     );
 
     const yBase = part.min_height_ft * footprintScale;
     const depth = (part.height_ft - part.min_height_ft) * footprintScale;
     if (depth <= 0) continue;
 
-    meshes.push(extrudedMesh(scaledShape, depth, wallMat, yBase));
-    meshes.push(roofCapMesh(scaledShape, roofMat, yBase + depth));
+    // Solid wall + roof cap
+    objects.push(extrudedMesh(scaledShape, depth, wallMat, yBase));
+    objects.push(roofCapMesh(scaledShape, roofMat, yBase + depth));
+
+    // Edge lines — trace the top perimeter of each part so step boundaries
+    // read as crisp architectural setback lines rather than blurry block seams
+    const pts2d = scaledShape.getPoints();
+    const edgePts = pts2d.map(p => new THREE.Vector3(p.x, yBase + depth, p.y));
+    edgePts.push(edgePts[0]); // close the loop
+    const edgeGeo = new THREE.BufferGeometry().setFromPoints(edgePts);
+    objects.push(new THREE.Line(edgeGeo, edgeMat));
   }
 
-  return meshes;
+  return objects;
 }
 
 // ---------------------------------------------------------------------------
@@ -311,13 +354,19 @@ export function drawBuilding3d(
     polygonOffsetFactor: -1,
     polygonOffsetUnits: -4,
   });
+  // Edge lines drawn on top of each part's roof perimeter — a slightly darker
+  // tint of the wall colour so setback boundaries read as architectural lines.
+  const edgeMat = new THREE.LineBasicMaterial({
+    color: new THREE.Color(wallHex).multiplyScalar(0.55),
+    linewidth: 1,
+  });
 
   // ------------------------------------------------------------------
   // Build geometry
   // ------------------------------------------------------------------
   const heightFt = building.height_ft ?? Math.max(12, (building.num_floors ?? 4) * 12);
   let footprintScale = 1;
-  const bodyMeshes: THREE.Mesh[] = [];
+  const bodyMeshes: THREE.Object3D[] = [];
 
   if (building.the_geom) {
     const geom = building.the_geom as GeoJSONGeom;
@@ -332,7 +381,7 @@ export function drawBuilding3d(
 
     if (building.osm_parts?.length > 0) {
       // OSM 3D parts — real geometry, no hardcoding
-      bodyMeshes.push(...buildOsmPartMeshes(building.osm_parts, cx, cy, footprintScale, wallMat, roofMat));
+      bodyMeshes.push(...buildOsmPartMeshes(building.osm_parts, geom, cx, cy, footprintScale, wallMat, roofMat, edgeMat));
     } else {
       // Plain extrusion — correct for most buildings, great for distinctive footprints
       const shape = ringToShape(outerRing);
@@ -431,7 +480,7 @@ export function drawBuilding3d(
   function cleanup() {
     cancelAnimationFrame(rafId);
     buildingGroup.traverse(obj => {
-      if (obj instanceof THREE.Mesh) {
+      if (obj instanceof THREE.Mesh || obj instanceof THREE.Line) {
         obj.geometry.dispose();
         (obj.material as THREE.Material).dispose();
       }
