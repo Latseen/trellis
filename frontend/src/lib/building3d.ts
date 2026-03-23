@@ -309,6 +309,7 @@ function buildOsmPartMeshes(
 
 export interface BuildingScene {
   cleanup: () => void;
+  resize: (w: number, h: number) => void;
 }
 
 export interface BuildingInput {
@@ -323,15 +324,18 @@ export function drawBuilding3d(
   // ------------------------------------------------------------------
   // Renderer
   // ------------------------------------------------------------------
+  const w = canvas.clientWidth || 400;
+  const h = canvas.clientHeight || 300;
+
   const renderer = new THREE.WebGLRenderer({ canvas, antialias: true, alpha: true });
   renderer.setPixelRatio(window.devicePixelRatio);
-  renderer.setSize(canvas.clientWidth || 400, canvas.clientHeight || 300);
+  renderer.setSize(w, h, false);
   renderer.setClearColor(0x000000, 0);
 
   // ------------------------------------------------------------------
   // Camera — orthographic isometric
   // ------------------------------------------------------------------
-  const aspect = (canvas.clientWidth || 400) / (canvas.clientHeight || 300);
+  const aspect = w / h;
   const viewSize = 200;
   const camera = new THREE.OrthographicCamera(
     -viewSize * aspect, viewSize * aspect,
@@ -427,32 +431,57 @@ export function drawBuilding3d(
   const buildingGroup = new THREE.Group();
   for (const m of bodyMeshes) buildingGroup.add(m);
 
+  // Compute actual rendered height from body geometry (more accurate than PLUTO height,
+  // especially for OSM buildings whose parts may differ from PLUTO values).
+  const bodyBox = new THREE.Box3().setFromObject(buildingGroup);
+  const actualMaxY = bodyBox.max.y > 0 ? bodyBox.max.y : heightFt * footprintScale;
+
   // ------------------------------------------------------------------
   // Green roof overlay (score-based)
   // ------------------------------------------------------------------
-  if (score > 25 && building.the_geom) {
+  const greenMat = new THREE.MeshLambertMaterial({
+    color: 0x4a9a28,
+    transparent: true,
+    opacity: 0.85,
+    polygonOffset: true,
+    polygonOffsetFactor: -2,
+    polygonOffsetUnits: -8,
+  });
+
+  if (score > 25) {
     const coverage = Math.min((score - 25) / 75, 1);
-    const geom = building.the_geom as GeoJSONGeom;
-    const [cx, cy] = geomCenter(geom);
-    const outerRing = footprintToLocalFt(geom, cx, cy);
+    // Use sqrt so the visible patch is area-proportional to the score.
+    const patchScale = footprintScale * Math.sqrt(coverage);
 
-    const greenShape = new THREE.Shape(
-      outerRing.map(([x, y]) => new THREE.Vector2(x * footprintScale * coverage, y * footprintScale * coverage))
-    );
-
-    const greenGeo = new THREE.ShapeGeometry(greenShape);
-    greenGeo.rotateX(-Math.PI / 2);
-    greenGeo.translate(0, heightFt * footprintScale + 0.5, 0);
-
-    const greenMat = new THREE.MeshLambertMaterial({
-      color: 0x4a9a28,
-      transparent: true,
-      opacity: 0.85,
-      polygonOffset: true,
-      polygonOffsetFactor: -2,
-      polygonOffsetUnits: -8,
-    });
-    buildingGroup.add(new THREE.Mesh(greenGeo, greenMat));
+    if (building.the_geom) {
+      const geom = building.the_geom as GeoJSONGeom;
+      const [cx, cy] = geomCenter(geom);
+      const outerRing = footprintToLocalFt(geom, cx, cy);
+      const greenShape = new THREE.Shape(
+        outerRing.map(([x, y]) => new THREE.Vector2(x * patchScale, y * patchScale))
+      );
+      const greenGeo = new THREE.ShapeGeometry(greenShape);
+      greenGeo.rotateX(-Math.PI / 2);
+      greenGeo.translate(0, actualMaxY + 0.5, 0);
+      buildingGroup.add(new THREE.Mesh(greenGeo, greenMat));
+    } else {
+      // Rectangular fallback: scale the same square shape used for the body.
+      const floorArea = building.bld_area
+        ? building.bld_area / Math.max(building.num_floors ?? 1, 1)
+        : building.lot_area ?? 3000;
+      const side = Math.sqrt(Math.max(floorArea, 400));
+      const halfSide = (side / 2) * patchScale;
+      const greenShape = new THREE.Shape();
+      greenShape.moveTo(-halfSide, -halfSide);
+      greenShape.lineTo( halfSide, -halfSide);
+      greenShape.lineTo( halfSide,  halfSide);
+      greenShape.lineTo(-halfSide,  halfSide);
+      greenShape.closePath();
+      const greenGeo = new THREE.ShapeGeometry(greenShape);
+      greenGeo.rotateX(-Math.PI / 2);
+      greenGeo.translate(0, actualMaxY + 0.5, 0);
+      buildingGroup.add(new THREE.Mesh(greenGeo, greenMat));
+    }
   }
 
   scene.add(buildingGroup);
@@ -460,8 +489,7 @@ export function drawBuilding3d(
   // ------------------------------------------------------------------
   // Refit camera to actual rendered building extents
   // ------------------------------------------------------------------
-  const renderedHeight = heightFt * footprintScale;
-  const centerY = renderedHeight / 2;
+  const centerY = actualMaxY / 2;
   const neededHalf = Math.max(viewSize, centerY * 1.25);
 
   camera.top = neededHalf;
@@ -486,6 +514,17 @@ export function drawBuilding3d(
   animate();
 
   // ------------------------------------------------------------------
+  // Resize — call when the canvas CSS dimensions change
+  // ------------------------------------------------------------------
+  function resize(newW: number, newH: number) {
+    renderer.setSize(newW, newH, false);
+    const newAspect = newW / newH;
+    camera.left = -neededHalf * newAspect;
+    camera.right = neededHalf * newAspect;
+    camera.updateProjectionMatrix();
+  }
+
+  // ------------------------------------------------------------------
   // Cleanup
   // ------------------------------------------------------------------
   function cleanup() {
@@ -499,5 +538,5 @@ export function drawBuilding3d(
     renderer.dispose();
   }
 
-  return { cleanup };
+  return { cleanup, resize };
 }
